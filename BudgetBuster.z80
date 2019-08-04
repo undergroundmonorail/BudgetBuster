@@ -1,0 +1,1385 @@
+;****************************************************************************************************************************************************
+;*	KeepUp
+;*
+;****************************************************************************************************************************************************
+;*
+;*
+;****************************************************************************************************************************************************
+
+;****************************************************************************************************************************************************
+;*	Includes
+;****************************************************************************************************************************************************
+	; system includes
+	INCLUDE	"hardware.inc"
+	INCLUDE	"sprite.inc"	
+	INCLUDE	"memory.z80"
+	
+	INCLUDE "tiles.z80"
+	INCLUDE "map.z80"
+	INCLUDE "game over.z80"
+;****************************************************************************************************************************************************
+;*	user data (constants)
+;****************************************************************************************************************************************************
+
+
+;****************************************************************************************************************************************************
+;*	equates
+;****************************************************************************************************************************************************
+	SpriteAttr	Player
+	SpriteAttr	Bullet
+	
+	SpriteAttr	Ghost1
+
+;****************************************************************************************************************************************************
+;*	cartridge header
+;****************************************************************************************************************************************************
+
+	SECTION	"Org $00",ROM0[$00]
+RST_00:	
+	jp	$100
+
+	SECTION	"Org $08",ROM0[$08]
+RST_08:	
+	jp	$100
+
+	SECTION	"Org $10",ROM0[$10]
+RST_10:
+	jp	$100
+
+	SECTION	"Org $18",ROM0[$18]
+RST_18:
+	jp	$100
+
+	SECTION	"Org $20",ROM0[$20]
+RST_20:
+	jp	$100
+
+	SECTION	"Org $28",ROM0[$28]
+RST_28:
+	jp	$100
+
+	SECTION	"Org $30",ROM0[$30]
+RST_30:
+	jp	$100
+
+	SECTION	"Org $38",ROM0[$38]
+RST_38:
+	jp	$100
+
+	SECTION	"V-Blank IRQ Vector",ROM0[$40]
+VBL_VECT:
+	call VBLANK_CODE
+	reti
+	
+	SECTION	"LCD IRQ Vector",ROM0[$48]
+LCD_VECT:
+	reti
+
+	SECTION	"Timer IRQ Vector",ROM0[$50]
+TIMER_VECT:
+	reti
+
+	SECTION	"Serial IRQ Vector",ROM0[$58]
+SERIAL_VECT:
+	reti
+
+	SECTION	"Joypad IRQ Vector",ROM0[$60]
+JOYPAD_VECT:
+	reti
+	
+	SECTION	"Start",ROM0[$100]
+	nop
+	jp	Start
+
+	; $0104-$0133 (Nintendo logo - do _not_ modify the logo data here or the GB will not run the program)
+	DB	$CE,$ED,$66,$66,$CC,$0D,$00,$0B,$03,$73,$00,$83,$00,$0C,$00,$0D
+	DB	$00,$08,$11,$1F,$88,$89,$00,$0E,$DC,$CC,$6E,$E6,$DD,$DD,$D9,$99
+	DB	$BB,$BB,$67,$63,$6E,$0E,$EC,$CC,$DD,$DC,$99,$9F,$BB,$B9,$33,$3E
+
+	; $0134-$013E (Game title - up to 11 upper case ASCII characters; pad with $00)
+	DB	"BUSTER",0,0,0,0,0
+		;0123456789A
+
+	; $013F-$0142 (Product code - 4 ASCII characters, assigned by Nintendo, just leave blank)
+	DB	"    "
+		;0123
+
+	; $0143 (Color GameBoy compatibility code)
+	DB	$00	; $00 - DMG 
+			; $80 - DMG/GBC
+			; $C0 - GBC Only cartridge
+
+	; $0144 (High-nibble of license code - normally $00 if $014B != $33)
+	DB	$00
+
+	; $0145 (Low-nibble of license code - normally $00 if $014B != $33)
+	DB	$00
+
+	; $0146 (GameBoy/Super GameBoy indicator)
+	DB	$00	; $00 - GameBoy
+
+	; $0147 (Cartridge type - all Color GameBoy cartridges are at least $19)
+	DB	$09	; ROM+RAM+BATTERY
+
+	; $0148 (ROM size)
+	DB	$01	; $01 - 512Kbit = 64Kbyte = 4 banks
+
+	; $0149 (RAM size)
+	DB	$01	; $01 - 64KByte
+
+	; $014A (Destination code)
+	DB	$00	; $01 - All others
+			; $00 - Japan
+
+	; $014B (Licensee code - this _must_ be $33)
+	DB	$33	; $33 - Check $0144/$0145 for Licensee code.
+
+	; $014C (Mask ROM version - handled by RGBFIX)
+	DB	$00
+
+	; $014D (Complement check - handled by RGBFIX)
+	DB	$00
+
+	; $014E-$014F (Cartridge checksum - handled by RGBFIX)
+	DW	$00
+
+
+;****************************************************************************************************************************************************
+;*	Program Start
+;****************************************************************************************************************************************************
+
+	SECTION "Program Start",ROM0[$150]
+Start::
+	; interrupt/stack pointer boilerplate
+	di
+	ld	a,$01
+	ldh	[$FF],a
+	ld	sp,$FFFE
+	
+	; clear pending interrupts
+	xor	a
+	ldh	[$0F],a
+	
+	; wait for v-blank before continuing
+	halt
+	nop
+	
+	; disable LCD screen for now
+	ldh	[rLCDC],a
+	
+	; clear out shadow OAM and room for a few variables
+	ld	hl,_RAM
+	ld	bc,$AB
+	call	mem_Set
+	
+	; copy OAM DMA code to HRAM where we can easily access it later
+	ld	de,_HRAM
+	ld	hl,dmacode
+	ld	bc,dmaend-dmacode
+	call	mem_Copy
+	
+	; set bg palette and sprite palette 0
+	ld	a,%11100100
+	ld	[rBGP],a
+	ld	[rOBP0],a
+	
+	; load tiles and map
+	ld	hl,TileLabel
+	call	load_Tiles
+	ld	hl,MapLabel
+	call	load_Map
+	
+	ld	hl,GameOverLabel
+	ld	de,_SCRN1+0+(SCRN_VY_B*0)
+	ld	bc,32*18
+	call	mem_Copy
+	
+	; set up sound registers
+	ld	a,%10000000
+	; Channel 1: Wave Pattern Duty = 50%
+	;            Sound Length = 0 (unused)
+	ldh	[$11],a
+	
+	; Channel 1: Volume = 0/15
+	;            Envelope Direction = Decrease (unused)
+	;            Number of Envelop Sweep = 0 (disable)
+	xor a
+	ldh	[$12],a
+	
+	ld	a,%01000000
+	; Channel 2: Wave Pattern Duty = 25%
+	;            Sound Length = 0 (unused)
+	ldh	[$16],a
+
+	; Channel 2: Volume = 0/15
+	;            Envelope Direction = Decrease (unused)
+	;            Number of Envelop Sweep = 0 (disable)
+	xor a
+	ldh	[$17],a
+	
+	; Channel 3: Muted
+	ldh	[$1C],a
+	
+	ld	a,%01110111
+	; Channels 1, 2 and 3 enabled on both outputs
+	ldh	[$25],a
+	
+	; Set Channel 3 wave pattern to a 50% square wave at 8/15 amplitude
+	; When played at 100% volume, sounds the same as Channel 1
+	cpl
+	ld	hl,$FF30
+	ld	[hli],a ; \
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |-- First 16 samples of waveform = 0100
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; /
+	xor	a
+	ld	[hli],a ; \
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |-- Last 16 samples of waveform = 0000
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; |
+	ld	[hli],a ; /
+	
+	; Channel 1: Sweep Time = 0 (disable)
+	;            Sweep Increase/Decrease = Addition (unused)
+	;            Number of sweep shift = 0 (unused)
+	ldh	[$10],a
+	
+	; clear pending interrupts
+	ldh	[$0F],a
+	
+	; turn interrupts and screen back on
+	ei
+	; 	   /------------ ............LCD Display Enable: On
+	; 	   |/----------- Window Tile Map Display Select: 9800-9BFF
+	; 	   ||/---------- .........Window Display Enable: Off
+	; 	   |||/--------- ..BG & Window Tile Data Select: 8000-8FFF
+	; 	   ||||/-------- ....BG Tile Map Display Select: 9800-9BFF
+	; 	   |||||/------- .............OBJ (Sprite) Size: 8x8
+	; 	   ||||||/------ ...OBJ (Sprite) Display Enable: Off
+	; 	   |||||||/----- ....................BG Display: On
+	ld	a,%10010001
+	ld	[rLCDC],a
+	
+	ld	a,$E1
+	ld	[$FFD3],a
+	ld	a,$D6
+	ld	[$FFD4],a
+	
+	ld	a,$0A
+	ld	[0],a
+	ld	hl,$A000
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl]
+	push	af
+	xor	a
+	ld	[0],a
+	pop	af
+	ld	hl,$C0AA
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl],a
+	
+	xor	a
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	add	[hl]
+	inc	hl
+	cp	[hl]
+	ld	a,$00
+	ld	[hl-],a
+	jr	z,.checksumPass
+	ld	[hl-],a
+	ld	[hl-],a
+	ld	[hl-],a
+	ld	[hl],a
+.checksumPass
+	
+	; Put the player in its starting location
+	ld	a,(SCRN_Y/2)+12
+	ld	[PlayerYAddr],a
+	ld	a,(SCRN_X/2)+4
+	ld	[PlayerXAddr],a
+	; Set the player's appearance
+	ld	a,$01
+	ld	[PlayerTileNum],a
+	
+Main::
+	call	Get_Keys
+	ld	a,[$C0A0]
+	sub	$1
+	jr	nc,.setGlobalCounter
+	ld	a,$05
+.setGlobalCounter
+	ld	[$C0A0],a
+	ld	a,[$FF40]
+	and	%00001000
+	jp	z,.down
+	ld	a,%01000110
+	and	b
+	cp	%01000110
+	jr	nz,.dontEraseScore
+	ld	a,$0a
+	ld	[0],a
+	ld	hl,$A000
+	inc	[hl]
+	xor	a
+	ld	[0],a
+	ld	hl,$C0A6
+	ld	[hl+],a
+	ld	[hl+],a
+	ld	[hl+],a
+	ld	[hl+],a
+	ld	[hl],a
+.dontEraseScore
+	ld	a,%00001000
+	and	b
+	jr	z,.ghostOnMe
+	xor	a
+	ld	hl,$C0A2
+	ld	[hl+],a
+	ld	[hl+],a
+	ld	[hl+],a
+	ld	[hl],a
+	ld	[$C0AA],a
+	
+	; Put the player in its starting location
+	ld	a,(SCRN_Y/2)+12
+	ld	[PlayerYAddr],a
+	ld	a,(SCRN_X/2)+4
+	ld	[PlayerXAddr],a
+	; Set the player's appearance
+	ld	a,$01
+	ld	[PlayerTileNum],a
+	
+	ld	a,[$FF40]
+	and	%11110111
+	ld	[$FF40],a
+	
+	ld	hl,Ghost1TileNum
+.eraseGhostLoop
+	ld	[hl],$00
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,l
+	cp	$2A
+	jr	nz,.eraseGhostLoop
+	jr	.down
+.ghostOnMe
+	ld	a,[PlayerXAddr]
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	ld	c,a
+	ld	hl,Ghost1YAddr
+.ghostOnMeLoop
+	ld	a,l
+	cp	$28
+	jp	z,.direction
+	ld	a,[hl+]
+	ld	e,a
+	ld	a,[hl+]
+	ld	d,a
+	ld	a,[hl+]
+	inc	hl
+	cp	$04
+	jr	nz,.ghostOnMeLoop
+	ld	a,d
+	cp	b
+	jr	nz,.ghostOnMeLoop
+	ld	a,e
+	cp	c
+	jr	nz,.ghostOnMeLoop
+	dec	hl
+	dec	hl
+	ld	[hl],$00
+	inc	hl
+	inc	hl
+	ld	a,$04
+	ld	[PlayerTileNum],a
+	xor	a
+	ld	[PlayerFlags],a
+	jr	.ghostOnMeLoop
+.down
+	ld	a,%10000000
+	and	b
+	jr	z,.up
+	ld	a,%00000001
+	and	b
+	jr	nz,.doneFacingDown
+	ld	a,$01
+	ld	[PlayerTileNum],a
+	ld	a,[PlayerFlags]
+	or	%01000000
+	and	%11011111
+	ld	[PlayerFlags],a
+.doneFacingDown
+	push	bc
+	ld	a,[PlayerXAddr]
+	dec	a
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$08
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.left
+	push	bc
+	ld	a,[PlayerXAddr]
+	sub	$08
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$08
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.left
+	ld	a,[PlayerYAddr]
+	inc	a
+	ld	[PlayerYAddr],a
+	jr	.left
+.up
+	ld	a,%01000000
+	and	b
+	jr	z,.left
+	ld	a,%00000001
+	and	b
+	jr	nz,.doneFacingUp
+	ld	a,$01
+	ld	[PlayerTileNum],a
+	ld	a,[PlayerFlags]
+	and	%10011111
+	ld	[PlayerFlags],a
+.doneFacingUp
+	push	bc
+	ld	a,[PlayerXAddr]
+	dec	a
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$11
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.left
+	push	bc
+	ld	a,[PlayerXAddr]
+	sub	$08
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$11
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.left
+	ld	a,[PlayerYAddr]
+	dec	a
+	ld	[PlayerYAddr],a
+.left
+	ld	a,%00100000
+	and	b
+	jr	z,.right
+	ld	a,%00000001
+	and	b
+	jr	nz,.doneFacingLeft
+	ld	a,$02
+	ld	[PlayerTileNum],a
+	ld	a,[PlayerFlags]
+	or	%00100000
+	and	%10111111
+	ld	[PlayerFlags],a
+.doneFacingLeft
+	push	bc
+	ld	a,[PlayerXAddr]
+	sub	$9
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$10
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.shoot
+	push	bc
+	ld	a,[PlayerXAddr]
+	sub	$9
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$9
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.shoot
+	ld	a,[PlayerXAddr]
+	dec	a
+	ld	[PlayerXAddr],a
+	jr	.shoot
+.right
+	ld	a,%00010000
+	and	b
+	jr	z,.shoot
+	ld	a,%00000001
+	and	b
+	jr	nz,.doneFacingRight
+	ld	a,$02
+	ld	[PlayerTileNum],a
+	ld	a,[PlayerFlags]
+	and	%10011111
+	ld	[PlayerFlags],a
+.doneFacingRight
+	push	bc
+	ld	a,[PlayerXAddr]
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$10
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.shoot
+	push	bc
+	ld	a,[PlayerXAddr]
+	ld	b,a
+	ld	a,[PlayerYAddr]
+	sub	$9
+	ld	c,a
+	call	Wall_At_Location
+	pop	bc
+	jr	nz,.shoot
+	ld	a,[PlayerXAddr]
+	inc	a
+	ld	[PlayerXAddr],a
+.shoot
+	ld	a,%00000001
+	and	b
+	jr	z,.switch
+	ld	a,[BulletTileNum]
+	or	a
+	jr	nz,.switch
+	call	shoot_noise
+	ld	a,$03
+	ld	[BulletTileNum],a
+	ld	a,[PlayerYAddr]
+	ld	[BulletYAddr],a
+	ld	a,[PlayerXAddr]
+	ld	[BulletXAddr],a
+	ld	a,[PlayerTileNum]
+	and	%00000001
+	ld	c,a
+	ld	a,[PlayerFlags]
+	and	%01100000
+	ld	a,$00
+	jr	z,.direction
+	ld	a,%00000010
+.direction
+	or	c
+	sla	a
+	sla	a
+	sla	a
+	sla	a
+	sla	a
+	ld	c,a
+	ld	a,[BulletFlags]
+	and	%10011111
+	or	c
+	ld	[BulletFlags],a
+.switch
+	ld	a,%00000010
+	and	b
+	jr	z,.unpressB
+	ld	a,[$C0A1]
+	or	a
+	jr	nz,.bulletDespawnWall
+	ld	a,$01
+	ld	[$C0A1],a
+	ld	hl,Ghost1TileNum
+.findCurrentSelected
+	ld	a,[hl]
+	cp	$04
+	jr	z,.selectionFound
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,l
+	cp	$2A
+	jr	z,.bulletDespawnWall
+	jr	.findCurrentSelected
+.selectionFound
+	ld	[hl],$06
+	ld	a,$09
+	ld	b,a
+	call	Find_Next_Ghost
+	jr	.bulletDespawnWall
+.unpressB
+	xor	a
+	ld	[$C0A1],a
+.bulletDespawnWall
+	ld	a,[BulletXAddr]
+	sub	$05
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0E
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$04
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0E
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$06
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0D
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$03
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0D
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$06
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0C
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$03
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0C
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$05
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0B
+	ld	c,a
+	call	Wall_At_Location
+	jr	nz,.despawn
+	ld	a,[BulletXAddr]
+	sub	$05
+	ld	b,a
+	ld	a,[BulletYAddr]
+	sub	$0B
+	ld	c,a
+	call	Wall_At_Location
+	jr	z,.bulletMovement
+.despawn
+	xor	a
+	ld	[BulletTileNum],a
+.bulletMovement
+	ld	a,[BulletFlags]
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	and	%00000011
+	jr	z,.bulletRight
+	dec	a
+	jr	z,.bulletUp
+	dec	a
+	jr	z,.bulletLeft
+.bulletDown
+	ld	a,[BulletYAddr]
+	add	$03
+	ld	[BulletYAddr],a
+	jr	.bulletDespawnX
+.bulletUp
+	ld	a,[BulletYAddr]
+	sub	$03
+	ld	[BulletYAddr],a
+	jr	.bulletDespawnX
+.bulletRight
+	ld	a,[BulletXAddr]
+	add	$03
+	ld	[BulletXAddr],a
+	jr	.bulletDespawnX
+.bulletLeft
+	ld	a,[BulletXAddr]
+	sub	$03
+	ld	[BulletXAddr],a
+.bulletDespawnX
+	ld	a,[BulletXAddr]
+	sub	$A7
+	jr	c,.bulletDespawnY
+	xor	a
+	ld	[BulletTileNum],a
+.bulletDespawnY
+	ld	a,[BulletYAddr]
+	sub	$9F
+	jr	c,.moveGhosts
+	xor	a
+	ld	[BulletTileNum],a
+.moveGhosts
+	ld	hl,$C0A0
+	ld	a,[hl]
+	or	a
+	jr	nz,.killGhosts
+	ld	hl,$C00A
+	ld	bc,$0006
+.ghostLoop
+	ld	a,l
+	dec	hl
+	cp	a,$2A
+	jr	z,.killGhosts
+	ld	a,[PlayerXAddr]
+	cp	[hl]
+	jr	z,.ghostY
+	ld	a,[hl]
+	jr	c,.xCarried
+	add	$02
+.xCarried
+	dec	a
+	ld	[hl],a
+.ghostY
+	dec	hl
+	ld	a,[PlayerYAddr]
+	cp	[hl]
+	jr	z,.resetGhostLoop
+	ld	a,[hl]
+	jr	c,.yCarried
+	add	$02
+.yCarried
+	dec	a
+	ld	[hl],a
+.resetGhostLoop
+	add	hl,bc
+	jr	.ghostLoop
+.killGhosts
+	ld	a,[BulletTileNum]
+	or	a
+	jr	z,.dieToGhosts
+	ld	hl,$C00A
+.killGhostLoop
+	ld	a,l
+	cp	$2A
+	jr	z,.dieToGhosts
+	ld	a,[hl]
+	or	a
+	jr	z,.resetGhostKillLoop
+	dec	hl
+	ld	a,$FF
+	add	[hl]
+	ld	b,a
+	sub	$07
+	ld	c,a
+	ld	a,$FD
+	push	hl
+	ld	hl,BulletXAddr
+	add	[hl]
+	pop	hl
+	ld	d,a
+	sub	$03
+	ld	e,a
+	call	One_Dimensional_Hit_Detection
+	inc	hl
+	jr	z,.resetGhostKillLoop
+	dec	hl
+	dec	hl
+	ld	a,$F7
+	add	[hl]
+	ld	b,a
+	sub	$07
+	ld	c,a
+	ld	a,$F5
+	push	hl
+	ld	hl,BulletYAddr
+	add	[hl]
+	pop	hl
+	ld	d,a
+	sub	$03
+	ld	e,a
+	call	One_Dimensional_Hit_Detection
+	inc	hl
+	inc	hl
+	jr	z,.resetGhostKillLoop
+	call	hit_noise
+	call	Increment_Score
+	ld	a,[hl]
+	cp	$04
+	jr	nz,.skipGhostVisibility
+	ld	a,$09
+	ld	b,a
+	push	hl
+	call	Find_Next_Ghost
+	pop	hl
+.skipGhostVisibility
+	ld	[hl],$0
+	xor	a
+	ld	[BulletTileNum],a
+	jr	.dieToGhosts
+.resetGhostKillLoop
+	ld	bc,$0004
+	add	hl,bc
+	jr	.killGhostLoop
+.dieToGhosts
+	ld	a,[PlayerTileNum]
+	or	a
+	jr	z,.initGhostsVisibleLoop
+	cp	$04
+	jr	z,.initGhostsVisibleLoop
+	ld	hl,$C00A
+.playerKillLoop
+	ld	a,l
+	cp	$2A
+	jr	z,.callRng
+	ld	a,[hl]
+	or	a
+	jr	z,.resetPlayerKillLoop
+	dec	hl
+	ld	a,$FF
+	add	[hl]
+	ld	b,a
+	sub	$07
+	ld	c,a
+	ld	a,$FF
+	push	hl
+	ld	hl,PlayerXAddr
+	add	[hl]
+	pop	hl
+	ld	d,a
+	sub	$07
+	ld	e,a
+	call	One_Dimensional_Hit_Detection
+	inc	hl
+	jr	z,.resetPlayerKillLoop
+	dec	hl
+	dec	hl
+	ld	a,$F7
+	add	[hl]
+	ld	b,a
+	sub	$07
+	ld	c,a
+	ld	a,$F7
+	push	hl
+	ld	hl,PlayerYAddr
+	add	[hl]
+	pop	hl
+	ld	d,a
+	sub	$07
+	ld	e,a
+	call	One_Dimensional_Hit_Detection
+	inc	hl
+	inc	hl
+	jr	z,.resetPlayerKillLoop
+	ld	a,[PlayerTileNum]
+	call	die_noise
+	call	Save_High
+	xor	a
+	ld	[PlayerTileNum],a
+	ld	[BulletTileNum],a
+	ld	a,[$FF40]
+	or	%00001000
+	ld	[$FF40],a
+.initGhostsVisibleLoop
+	ld	hl,Ghost1TileNum
+.ghostsVisibleLoop
+	ld	a,[hl]
+	cp	$06
+	jr	nz,.doNotAppear
+	ld	[hl],$04
+.doNotAppear
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,l
+	cp	$2A
+	jr	nz,.ghostsVisibleLoop
+	jr	.callRng
+.resetPlayerKillLoop
+	ld	bc,$0004
+	add	hl,bc
+	jr	.playerKillLoop
+.callRng
+	call	Random_
+	ld	a,[$FFD3]
+	cp	$40
+	jr	z,.spawnGhost
+	cp	$33
+	jr	z,.spawnGhost
+	cp	$AB
+	jr	z,.spawnGhost
+	cp	$BA
+	jr	nz,.wait
+.spawnGhost
+	ld	a,[$FFD4]
+.modFortyEight
+	sub	$48
+	jr	nc,.modFortyEight
+	add	$48
+	call	ID_To_Coords
+	ld	hl,Ghost1TileNum
+	ld	de,$0004
+.findGhostSlot
+	ld	a,[hl]
+	or	a
+	jr	z,.ghostSlotFound
+	add	hl,de
+	ld	a,l
+	cp	$2A
+	jr	z,.wait ; too many ghosts! we're out of slots
+	jr	.findGhostSlot
+.ghostSlotFound
+	push	hl
+	ld	hl,Ghost1TileNum
+.findVisibleGhost
+	ld	a,[hl]
+	cp	$04
+	jr	z,.visibleGhostFound
+	add	hl,de
+	ld	a,l
+	cp	$2A
+	jr	z,.noVisibleGhost
+	jr	.findVisibleGhost
+.visibleGhostFound
+	ld	a,$06
+	jr	.finishSpawning
+.noVisibleGhost
+	ld	a,$04
+.finishSpawning
+	pop	hl
+	ld	[hl],a
+	dec	hl
+	sla	b
+	sla	b
+	sla	b
+	ld	a,$08
+	add	b
+	ld	[hl-],a
+	sla	c
+	sla	c
+	sla	c
+	ld	a,$10
+	add	c
+	ld	[hl],a
+.wait
+	halt ; This is the loop where the code waits for a v-blank
+	nop
+	jp	Main
+
+VBLANK_CODE::
+	ld	hl,$9A26
+	ld	a,[$C0A2]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A3]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A4]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A5]
+	add	$10
+	ld	[hl],a
+	ld	hl,$9A30
+	ld	a,[$C0A6]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A7]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A8]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A9]
+	add	$10
+	ld	[hl],a
+	ld	hl,$9E26
+	ld	a,[$C0A2]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A3]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A4]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A5]
+	add	$10
+	ld	[hl],a
+	ld	hl,$9E30
+	ld	a,[$C0A6]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A7]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A8]
+	add	$10
+	ld	[hl+],a
+	ld	a,[$C0A9]
+	add	$10
+	ld	[hl],a
+.end
+	jp	_HRAM
+
+; in: a = number from $00 to $47
+; out: b = x of border tile, c = y of border tile
+ID_To_Coords::
+.topBorder
+	cp	$14
+	jr	nc,.bottomBorder
+	ld	b,a
+	ld	c,$00
+	ret
+.bottomBorder
+	cp	$28
+	jr	nc,.leftBorder
+	sub	$14
+	ld	b,a
+	ld	a,$11
+	ld	c,a
+	ret
+.leftBorder
+	cp	$38
+	jr	nc,.rightBorder
+	sub	$28
+	ld	c,a
+	ld	b,$00
+	ret
+.rightBorder
+	sub	$38
+	ld	c,a
+	ld	b,$13
+	ret
+
+Find_Next_Ghost::
+	dec	b
+	ret	z
+	inc	hl
+	inc	hl
+	inc	hl
+	inc	hl
+	ld	a,l
+	cp	$2A
+	jr	nz,.dontWrap
+	ld	hl,Ghost1TileNum
+.dontWrap
+	ld	a,[hl]
+	cp	$06
+	jr	nz,Find_Next_Ghost
+	ld	[hl],$04
+	ret
+
+; in: b = object 1 x1, c = object 1 x2,
+;     d = object 2 x1, e = object 2 x2
+One_Dimensional_Hit_Detection::
+	ld	a,d
+	push de
+	cp	b
+	ld	d,$00
+	jr	nc,.dbNoCarry
+	inc	d
+.dbNoCarry
+	cp	c
+	ld	a,$00
+	jr	nc,.dcNoCarry
+	inc	a
+.dcNoCarry
+	xor	d
+	pop	de
+	ret	nz
+	ld	a,e
+	cp	b
+	ld	d,$00
+	jr	nc,.ebNoCarry
+	inc	d
+.ebNoCarry
+	cp	c
+	ld	a,$00
+	jr	nc,.ecNoCarry
+	inc	a
+.ecNoCarry
+	xor	d
+	ret
+
+Increment_Score::
+	push hl
+	ld	hl,$C0A5
+	call	Increment_Digit
+	call	Check_High
+	pop	hl
+	ret
+
+Increment_Digit::
+	ld	a,[hl]
+	cp	$09
+	jp	z,.carry
+	inc	a
+	ld	[hl],a
+	ret
+.carry
+	ld	a,l
+	cp	$A2
+	jr	z,.cap
+	ld	[hl],0
+	dec	hl
+	jr	Increment_Digit
+.cap
+	ld	a,$09
+	ld	[$C0A3],a
+	ld	[$C0A4],a
+	ld	[$C0A5],a
+	ret
+
+Check_High::
+	; i tried so hard to do something clever here but i kept being unable to convince myself it was right
+	; i don't care anymore, the function can be gross
+	ld	a,[$C0A2]
+	ld	b,a
+	ld	a,[$C0A6]
+	cp	b
+	jr	z,.digitThree
+	jr	c,.newHigh
+	ret
+.digitThree
+	ld	a,[$C0A3]
+	ld	b,a
+	ld	a,[$C0A7]
+	cp	b
+	jr	z,.digitTwo
+	jr	c,.newHigh
+	ret
+.digitTwo
+	ld	a,[$C0A4]
+	ld	b,a
+	ld	a,[$C0A8]
+	cp	b
+	jr	z,.digitOne
+	jr	c,.newHigh
+	ret
+.digitOne
+	ld	a,[$C0A5]
+	ld	b,a
+	ld	a,[$C0A9]
+	cp	b
+	jr	c,.newHigh
+	ret
+.newHigh
+	ld	a,$01
+	ld	[$C0AA],a
+	ld	a,[$C0A2]
+	ld	[$C0A6],a
+	ld	a,[$C0A3]
+	ld	[$C0A7],a
+	ld	a,[$C0A4]
+	ld	[$C0A8],a
+	ld	a,[$C0A5]
+	ld	[$C0A9],a
+	ret	
+	
+Save_High::
+	ld	a,[$C0AA]
+	or	a
+	ret	z
+	ld	hl,$C0A6
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl+]
+	push	af
+	ld	a,[hl]
+	push	af
+	xor	a
+	add	[hl]
+	dec	hl
+	add	[hl]
+	dec	hl
+	add	[hl]
+	dec	hl
+	add	[hl]
+	push	af
+	ld	a,$0A
+	ld	[0],a
+	pop	af
+	ld	hl,$A004
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl-],a
+	pop	af
+	ld	[hl],a
+	xor	a
+	ld	[0],a
+	ret
+	
+
+; in: b = x, c = y
+; out: hl = tile reference
+Tile_At_Location::
+	srl	b
+	srl	b
+	srl	b
+	ld	a,%11111000
+	and	c
+	ld	e,a
+	sla	e
+	sla	e
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	srl	a
+	ld	d,a
+	ld	h,d
+	ld	l,e
+	ld	c,b
+	ld	b,$00
+	add	hl,bc
+	ld	bc,MapLabel
+	add	hl,bc
+	ret
+
+; in: b = x, c = y
+; out: a = %10000000 if wall, else 0
+; sets Z flag if not wall, else resets
+Wall_At_Location::
+	call	Tile_At_Location
+	ld	a,[hl]
+	cp	$05
+	push	af
+	pop	bc
+	ld	a,c
+	and	%10000000
+	ret
+	
+shoot_noise::
+	ld	a,%10110100
+	ldh	[$11],a
+	ld	a,%11000011
+	ldh	[$12],a
+	ld	a,%01110010
+	ldh	[$13],a
+	ld	a,%11000110
+	ldh	[$14],a
+	ret
+
+hit_noise::
+	ld	a,%10110100
+	ldh	[$16],a
+	ld	a,%11000011
+	ldh	[$17],a
+	ld	a,%11010110
+	ldh	[$18],a
+	ld	a,%11000110
+	ldh	[$19],a
+	ret
+
+die_noise::
+	ld	a,%10010100
+	ldh	[$16],a
+	ld	a,%11000011
+	ldh	[$17],a
+	ld	a,%01100011
+	ldh	[$18],a
+	ld	a,%11000101
+	ldh	[$19],a
+	ret
+    
+Random_::
+; Generate a random 16-bit value.
+	ld a, [rDIV]
+	ld b, a
+	ld a, [$FFD3]
+	adc b
+	ld [$FFD3], a
+	ld a, [rDIV]
+	ld b, a
+	ld a, [$FFD4]
+	sbc b
+	ld [$FFD4], a
+	ret
+		
+load_Tiles::
+	ld	de,_VRAM
+	ld	bc,16*26
+	jp	mem_Copy
+
+load_Map::
+	ld	de,_SCRN0+0+(SCRN_VY_B*0)
+	ld	bc,32*32
+	jp	mem_Copy
+
+dmacode::
+	ld	a,_RAM/$100
+	ldh	[rDMA],a ; Start DMA
+	ld	a,$28 ; 160ns
+dma_wait::
+	dec	a
+	jr	nz,dma_wait
+	ld	a,[rLCDC]
+	or	%00000010
+	ld	[rLCDC],a
+	ret
+dmaend::
+
+; v^<>SsBA
+Get_Keys::
+	ld	a,$20
+	ld	[$ff00],a
+	ld	a,[$ff00]
+	ld	a,[$ff00] ; wait a few cycles
+	cpl
+	and	$0f
+	swap	a
+	ld	b,a
+	ld	a,$10
+	ld	[$ff00],a
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00]
+	ld	a,[$ff00] ; wait a few more cycles
+	cpl
+	and	$0f
+	or	b
+	ld	b,a
+	ld	a,$30
+	ld	[$ff00],a ; reset joypad
+	ret
+
+;*** End Of File ***

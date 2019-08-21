@@ -19,7 +19,8 @@ def main(args):
 	with open(args[0]) as code:
 		filenames = get_includes(code.read())
 	subs = sum((fix_section_name(file) for file in filenames))
-	print("Fixed {} deprecated section name{}.".format(subs, '' if subs == 1 else 's'))
+	if subs:
+		print("Fixed {} deprecated section name{}.".format(subs, '' if subs == 1 else 's'))
 
 
 if __name__ == "__main__":
